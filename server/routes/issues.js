@@ -1,0 +1,13 @@
+const express = require("express");
+const issuesRouter = express.Router();
+const issueCtrl = require("../controllers/issueController");
+const { authenticate } = require("../middleware/auth");
+const { requirePermission } = require("../middleware/permissions");
+issuesRouter.use(authenticate);
+issuesRouter.get("/", requirePermission("read", "issue", (req) => ({ projectId: req.query.project })), issueCtrl.getIssues);
+issuesRouter.post("/", requirePermission("create", "issue", (req) => ({ projectId: req.body.project })), issueCtrl.createIssue);
+issuesRouter.get("/:id", requirePermission("read", "issue", (req) => ({ issueId: req.params.id, projectId: req.query.project })), issueCtrl.getIssue);
+issuesRouter.patch("/:id", requirePermission("update", "issue", (req) => ({ issueId: req.params.id })), issueCtrl.updateIssue);
+issuesRouter.delete("/:id", requirePermission("delete", "issue", (req) => ({ issueId: req.params.id })), issueCtrl.deleteIssue);
+issuesRouter.post("/:id/comments", requirePermission("comment", "issue", (req) => ({ issueId: req.params.id })), issueCtrl.addComment);
+module.exports = issuesRouter;

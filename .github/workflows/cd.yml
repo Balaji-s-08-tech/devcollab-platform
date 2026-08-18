@@ -1,0 +1,204 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  SERVER_IMAGE: ghcr.io/${{ github.repository }}/server
+  CLIENT_IMAGE: ghcr.io/${{ github.repository }}/client
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  IMAGE_TAG: sha-${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  build-and-push:
+    name: Build and Push Images
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      server-image: ${{ steps.images.outputs.server-image }}
+      client-image: ${{ steps.images.outputs.client-image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Publish server image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          file: ./server/Dockerfile
+          target: production
+          push: true
+          tags: |
+            ${{ env.SERVER_IMAGE }}:${{ env.IMAGE_TAG }}
+            ${{ env.SERVER_IMAGE }}:main
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,scope=server,mode=max
+
+      - name: Publish client image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./client
+          file: ./client/Dockerfile
+          target: production
+          push: true
+          build-args: |
+            VITE_API_URL=/api
+            VITE_SOCKET_URL=/
+            VITE_APP_NAME=DevCollab
+          tags: |
+            ${{ env.CLIENT_IMAGE }}:${{ env.IMAGE_TAG }}
+            ${{ env.CLIENT_IMAGE }}:main
+          cache-from: type=gha,scope=client
+          cache-to: type=gha,scope=client,mode=max
+
+      - name: Export image names
+        id: images
+        run: |
+          echo "server-image=${SERVER_IMAGE}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "client-image=${CLIENT_IMAGE}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+  deploy-staging:
+    name: Deploy Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment:
+      name: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install migration dependencies
+        working-directory: server
+        run: npm ci --omit=dev
+
+      - name: Run staging migrations
+        working-directory: server
+        env:
+          NODE_ENV: production
+          MONGODB_URI: ${{ secrets.STAGING_MONGODB_URI }}
+          JWT_SECRET: ${{ secrets.STAGING_JWT_SECRET }}
+        run: npm run migrate
+
+      - name: Deploy staging image
+        env:
+          DEPLOY_WEBHOOK_URL: ${{ secrets.STAGING_DEPLOY_WEBHOOK_URL }}
+          DEPLOY_WEBHOOK_TOKEN: ${{ secrets.STAGING_DEPLOY_WEBHOOK_TOKEN }}
+          SERVER_IMAGE: ${{ needs.build-and-push.outputs.server-image }}
+          CLIENT_IMAGE: ${{ needs.build-and-push.outputs.client-image }}
+        run: |
+          test -n "$DEPLOY_WEBHOOK_URL"
+          curl -fsS -X POST "$DEPLOY_WEBHOOK_URL" \
+            -H "Authorization: Bearer $DEPLOY_WEBHOOK_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"serverImage\":\"$SERVER_IMAGE\",\"clientImage\":\"$CLIENT_IMAGE\",\"sha\":\"${DEPLOY_SHA}\"}"
+
+      - name: Staging health check
+        env:
+          HEALTHCHECK_URL: ${{ secrets.STAGING_HEALTHCHECK_URL }}
+          ROLLBACK_WEBHOOK_URL: ${{ secrets.STAGING_ROLLBACK_WEBHOOK_URL }}
+          ROLLBACK_WEBHOOK_TOKEN: ${{ secrets.STAGING_ROLLBACK_WEBHOOK_TOKEN }}
+        run: |
+          if ! curl -fsS --retry 12 --retry-delay 10 --retry-all-errors "$HEALTHCHECK_URL"; then
+            if [ -n "$ROLLBACK_WEBHOOK_URL" ]; then
+              curl -fsS -X POST "$ROLLBACK_WEBHOOK_URL" \
+                -H "Authorization: Bearer $ROLLBACK_WEBHOOK_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"sha\":\"${DEPLOY_SHA}\",\"reason\":\"staging_health_check_failed\"}" || true
+            fi
+            exit 1
+          fi
+
+  deploy-production:
+    name: Deploy Production
+    runs-on: ubuntu-latest
+    needs:
+      - build-and-push
+      - deploy-staging
+    environment:
+      name: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install migration dependencies
+        working-directory: server
+        run: npm ci --omit=dev
+
+      - name: Run production migrations
+        working-directory: server
+        env:
+          NODE_ENV: production
+          MONGODB_URI: ${{ secrets.PRODUCTION_MONGODB_URI }}
+          JWT_SECRET: ${{ secrets.PRODUCTION_JWT_SECRET }}
+        run: npm run migrate
+
+      - name: Deploy production image
+        env:
+          DEPLOY_WEBHOOK_URL: ${{ secrets.PRODUCTION_DEPLOY_WEBHOOK_URL }}
+          DEPLOY_WEBHOOK_TOKEN: ${{ secrets.PRODUCTION_DEPLOY_WEBHOOK_TOKEN }}
+          SERVER_IMAGE: ${{ needs.build-and-push.outputs.server-image }}
+          CLIENT_IMAGE: ${{ needs.build-and-push.outputs.client-image }}
+        run: |
+          test -n "$DEPLOY_WEBHOOK_URL"
+          curl -fsS -X POST "$DEPLOY_WEBHOOK_URL" \
+            -H "Authorization: Bearer $DEPLOY_WEBHOOK_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"serverImage\":\"$SERVER_IMAGE\",\"clientImage\":\"$CLIENT_IMAGE\",\"sha\":\"${DEPLOY_SHA}\"}"
+
+      - name: Production health check
+        env:
+          HEALTHCHECK_URL: ${{ secrets.PRODUCTION_HEALTHCHECK_URL }}
+          ROLLBACK_WEBHOOK_URL: ${{ secrets.PRODUCTION_ROLLBACK_WEBHOOK_URL }}
+          ROLLBACK_WEBHOOK_TOKEN: ${{ secrets.PRODUCTION_ROLLBACK_WEBHOOK_TOKEN }}
+        run: |
+          if ! curl -fsS --retry 12 --retry-delay 10 --retry-all-errors "$HEALTHCHECK_URL"; then
+            if [ -n "$ROLLBACK_WEBHOOK_URL" ]; then
+              curl -fsS -X POST "$ROLLBACK_WEBHOOK_URL" \
+                -H "Authorization: Bearer $ROLLBACK_WEBHOOK_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"sha\":\"${DEPLOY_SHA}\",\"reason\":\"production_health_check_failed\"}" || true
+            fi
+            exit 1
+          fi

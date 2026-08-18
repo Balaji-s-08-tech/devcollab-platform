@@ -1,0 +1,68 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+.next/
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env.prod.example
+!.env.staging.example
+
+# SSL certs (never commit private keys)
+server/certs/*.pem
+server/certs/*.key
+server/certs/*.crt
+*.pem
+*.key
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Runtime / OS
+.DS_Store
+Thumbs.db
+*.pid
+*.seed
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test coverage
+coverage/
+
+# Uploads
+server/uploads/
+
+# Cache
+.eslintcache
+
+# AI Artifacts
+.claude/
+.claude-code/
+.cursor/
+.cursor-cache/
+.cursor-tmp/
+.gemini/
+.antigravity/
+.aider/
+.aider*
+.copilot/
+.codeium/
+.roo/
+.roocode/
+.windsurf/
+.cline/
+.continue/
+.history/

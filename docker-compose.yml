@@ -1,0 +1,107 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: devcollab-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: devcollab
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: devcollab-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.12
+    container_name: devcollab-meilisearch
+    restart: unless-stopped
+    environment:
+      MEILI_ENV: development
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-devcollab_meili_dev_key_change_me}
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "7700:7700"
+    volumes:
+      - meili_data:/meili_data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7700/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: ./server
+      target: dev
+    container_name: devcollab-server
+    restart: unless-stopped
+    env_file:
+      - ./.env.dev
+    environment:
+      NODE_ENV: development
+      PORT: 3443
+      MONGODB_URI: mongodb://mongo:27017/devcollab
+      REDIS_URL: redis://redis:6379
+      MEILI_HOST: http://meilisearch:7700
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-devcollab_meili_dev_key_change_me}
+      CLIENT_URL: http://localhost:5173
+      ENABLE_HTTPS: "false"
+      SSL_KEY_PATH: ""
+      SSL_CERT_PATH: ""
+    ports:
+      - "3443:3443"
+    volumes:
+      - ./server:/app
+      - server_node_modules:/app/node_modules
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+
+  client:
+    build:
+      context: ./client
+      target: dev
+    container_name: devcollab-client
+    restart: unless-stopped
+    env_file:
+      - ./.env.dev
+    environment:
+      VITE_API_URL: http://localhost:3443/api
+      VITE_SOCKET_URL: http://localhost:3443
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./client:/app
+      - client_node_modules:/app/node_modules
+    depends_on:
+      - server
+
+volumes:
+  mongo_data:
+  redis_data:
+  meili_data:
+  server_node_modules:
+  client_node_modules:
